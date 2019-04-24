@@ -44,9 +44,11 @@ public class SimpleDynamoProvider extends ContentProvider {
 	public static String mySocketId = "";
 
 	public static final String QUERY = "QUERY";
+	public static final String DELETE = "DELETE";
 	public static final String LDUMP = "@";
 	public static final String GDUMP = "*";
 	public static final String GDUMP_QUERY = "GDUMP_QUERY";
+	public static final String GDUMP_DELETE = "GDUMP_QUERY";
 
 	private static final String KEY_FIELD = "key";
 	private static final String VALUE_FIELD = "value";
@@ -61,7 +63,53 @@ public class SimpleDynamoProvider extends ContentProvider {
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
 		// TODO Auto-generated method stub
+
+		String[] columnNames = {"key", "value"};
+		if(selection.equals(LDUMP)) {
+			deleteAllDataFromLocal(uri);
+		}
+		else if(selection.equals(GDUMP)) {
+			// Send message to everyone to delete their content
+			deleteAllDataFromLocal(uri);
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, GDUMP_DELETE);
+		}
+		else {
+			String key = selection;
+			String partitionPort = getPartitionPort(key);
+			Log.i("Delete", key+" :: " + partitionPort);
+			if(partitionPort.equals(myPortId)) {
+				deleteFileFromLocal(uri, selection);
+			}
+			String msg = DELETE;
+			Message message = new Message(DELETE);
+			message.setKey(key);
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, msg, message.getString(), partitionPort);
+		}
+
 		return 0;
+	}
+
+	private void deleteAllDataFromLocal(Uri uri) {
+		File fileDirectory = currentContext.getFilesDir();
+		File[] listOfFiles = fileDirectory.listFiles();
+
+		for (int i = 0; i < listOfFiles.length; i++) {
+			File currentFile = listOfFiles[i];
+			currentFile.delete();
+		}
+	}
+
+	private void deleteFileFromLocal(Uri uri, String key) {
+		File fileDirectory = currentContext.getFilesDir();
+		File[] listOfFiles = fileDirectory.listFiles();
+
+		for (int i = 0; i < listOfFiles.length; i++) {
+			File currentFile = listOfFiles[i];
+			if(currentFile.getName().equals(key)) {
+				currentFile.delete();
+				break;
+			}
+		}
 	}
 
 	@Override
@@ -147,6 +195,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, serverSocket);
 		} catch (IOException e) {
 			Log.e(TAG, "Can't create a ServerSocket");
+			e.printStackTrace();
 		}
 
 
@@ -196,7 +245,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 							DataOutputStream dos = new DataOutputStream(stream);
 
-							dos.writeUTF("GDUMP_QUERY");
+							Message message = new Message(GDUMP_QUERY);
+
+							dos.writeUTF(message.getString());
 						} catch (UnknownHostException e) {
 							e.printStackTrace();
 						} catch (IOException e) {
@@ -224,6 +275,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 				String[] output = result.toString().split(",");
 				HashMap<String, String> map = new HashMap<String, String>();
 				for(String pair: output) {
+					Log.i("pair", pair);
 					String key = pair.split(" ")[0];
 					String value = pair.split(" ")[1];
 					if(!map.containsKey(key)) {
@@ -237,6 +289,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		else {
 			String key = selection;
 			String partitionPort = getPartitionPort(key);
+			Log.i("Query", key+" :: " + partitionPort);
 			if(partitionPort.equals(myPortId)) {
 				return findInLocal(key);
 			}
@@ -273,7 +326,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 				} catch (IOException e) {
 					e.printStackTrace();
 				}
-
 			}
 		}
 
@@ -375,7 +427,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	private class ServerTask extends AsyncTask<ServerSocket, String, Void> {
 
-		SimpleDynamoProvider dynamo;
+		SimpleDynamoProvider dynamo = new SimpleDynamoProvider();
 
 		@Override
 		protected Void doInBackground(ServerSocket... sockets) {
@@ -387,6 +439,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 			Socket socket = null;
 			DataInputStream dis = null;
 			InputStream stream = null;
+
+
 
 			while (true) {
 				try {
@@ -401,9 +455,10 @@ public class SimpleDynamoProvider extends ContentProvider {
 					if(messageType.equals(INSERT)) {
 						String key = splittedMessage[1].split(":")[1];
 						String value = splittedMessage[2].split(":")[1];
+						Log.i("Insert_Server", key+"  :  " +value);
 						dynamo.insertInLocalDb(mUri, key, value);
 					}
-					if(messageType.equals(GDUMP_QUERY)) {
+					else if(messageType.equals(GDUMP_QUERY)) {
 						MatrixCursor matrixCursor = dynamo.getAllDataFromLocal(mUri);
 						StringBuilder sb = new StringBuilder();
 
@@ -418,8 +473,29 @@ public class SimpleDynamoProvider extends ContentProvider {
 							// key value,key value,key value
 						}
 						DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
+						Log.i("GDUMP_QUERY_ANSWER", sb.toString());
 						dos.writeUTF(sb.toString());
 						dos.flush();
+					}
+					else if(messageType.equals(QUERY)) {
+						String key = splittedMessage[1].split(":")[1];
+						Cursor cursor = dynamo.findInLocal(key);
+						String value = "";
+						while(cursor.moveToNext()) {
+							value = cursor.getString(cursor.getColumnIndex(VALUE_FIELD));
+						}
+
+						Log.i("Query_Search",key + "   :  "+ value);
+						DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
+						dos.writeUTF(value);
+						dos.flush();
+					}
+					else if(messageType.equals(DELETE)) {
+						String key = splittedMessage[1].split(":")[1];
+						dynamo.deleteFileFromLocal(mUri, key);
+					}
+					else if(messageType.equals(GDUMP_DELETE)) {
+						dynamo.deleteAllDataFromLocal(mUri);
 					}
 				} catch (IOException e) {
 					Log.i("Server_Failed", "YE");
@@ -482,7 +558,58 @@ public class SimpleDynamoProvider extends ContentProvider {
 						dos.writeUTF(message);
 					}
 				}
+				else if(order.equals(GDUMP_DELETE)) {
+					for(String port : emulatorPorts) {
+						if (!port.equals(myPortId)) {
+							try {
+								String target = getSocketNumber(port);
+								socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+										Integer.parseInt(target));
+								stream = socket.getOutputStream();
 
+								dos = new DataOutputStream(stream);
+
+								Message message = new Message(GDUMP_DELETE);
+
+								dos.writeUTF(message.getString());
+							} catch (UnknownHostException e) {
+								e.printStackTrace();
+							} catch (IOException e) {
+								e.printStackTrace();
+							}
+						}
+					}
+				}
+				else if(order.equals(DELETE)) {
+					String message = msgs[1];
+					String partitionPort = msgs[2];
+					if (!partitionPort.equals(myPortId)) {
+						// Send message to that node to Delete value
+						String target = getSocketNumber(partitionPort);
+						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+								Integer.parseInt(target));
+
+						stream = socket.getOutputStream();
+
+						dos = new DataOutputStream(stream);
+
+						dos.writeUTF(message);
+					}
+
+					String[] successors = getSuccessors(partitionPort);
+					for (String successor : successors) {
+						// Send message to successors to delete the value
+						String target = getSocketNumber(successor);
+						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+								Integer.parseInt(target));
+
+						stream = socket.getOutputStream();
+
+						dos = new DataOutputStream(stream);
+
+						dos.writeUTF(message);
+					}
+				}
 			} catch (UnknownHostException unknownHost) {
 				Log.i("Unknown_host", "Unknown_host");
 			} catch (IOException io) {
