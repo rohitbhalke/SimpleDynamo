@@ -127,6 +127,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String value = (String) values.get("value");
 
 		String partitionPort = getPartitionPort(key);
+		Log.i("Insert_partition", partitionPort+":"+myPortId);
 		if (partitionPort.equals(myPortId)) {
 			// Insert in local file system
 			insertInLocalDb(uri, key, value);
@@ -183,7 +184,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
 		final String portNumber = String.valueOf((Integer.parseInt(portStr) * 2));
 
-		Log.i("BOOT_UP", portNumber);
+		Log.i("BOOT_UP", portStr+":"+portNumber);
 
 		myPortId = portStr;         // Ex: 5554
 		mySocketId = portNumber;    // Ex: 11108
@@ -198,6 +199,21 @@ public class SimpleDynamoProvider extends ContentProvider {
 			e.printStackTrace();
 		}
 
+		// Differentiate RECOVER and BOOTUP
+
+		File fileDirectory = currentContext.getFilesDir();
+		File[] listOfFiles = fileDirectory.listFiles();
+
+		if(listOfFiles.length > 0) {
+			Log.i("REINCARNATE", "Calling REINCARNATE");
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "REBORN");
+			/*
+					Cant call reIncarnate() from here as
+					https://stackoverflow.com/questions/6343166/how-do-i-fix-android-os-networkonmainthreadexception
+			 */
+
+			//reIncarnate();
+		}
 
 		return false;
 	}
@@ -313,6 +329,11 @@ public class SimpleDynamoProvider extends ContentProvider {
 				} catch (IOException e) {
 					e.printStackTrace();
 				}
+				catch (Exception e){
+					Log.e("Query_Exception_Send_DS", "For target::"+target);
+					// Ask one of its successor if this is failing
+					// Here need to query the replicas of the target node, and return their values
+				}
 				InputStream inputStream = null;
 				try {
 					inputStream = socket.getInputStream();
@@ -325,6 +346,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 					return matrixCursor;
 				} catch (IOException e) {
 					e.printStackTrace();
+				} catch (Exception e) {
+					Log.e("Query_Exception_Receive_DS", "For target::"+target);
 				}
 			}
 		}
@@ -425,6 +448,96 @@ public class SimpleDynamoProvider extends ContentProvider {
 		return portNumbers.get(portIndex);    // return port like 5554
 	}
 
+
+	private void reIncarnate() {
+
+		File fileDirectory = currentContext.getFilesDir();
+		File[] listOfFiles = fileDirectory.listFiles();
+
+		// Delete everything first
+		for(File file : listOfFiles) {
+			file.delete();
+		}
+
+		// get messages from 2 successors
+		String[] successors = getSuccessors(myPortId);
+
+		// get messages from 2 predessors
+		String[] predessors = getPredessors(myPortId);
+
+		String[] nodes = {successors[0], predessors[0], predessors[1]};
+
+		// Take messages from these 4 nodes first
+		StringBuilder result = new StringBuilder();
+
+
+		DataInputStream dis = null;
+		for(String port : nodes) {
+			Socket socket = null;
+				try {
+					String target = getSocketNumber(port);
+					socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+							Integer.parseInt(target));
+					OutputStream stream = socket.getOutputStream();
+
+					DataOutputStream dos = new DataOutputStream(stream);
+
+					Message message = new Message(GDUMP_QUERY);
+
+					dos.writeUTF(message.getString());
+				} catch (UnknownHostException e) {
+					e.printStackTrace();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+
+				InputStream inputStream = null;
+				try {
+					inputStream = socket.getInputStream();
+					dis = new DataInputStream(inputStream);
+					String message = dis.readUTF();
+
+					result.append(message);
+
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+		}
+
+		/*
+				Take all these messages and filter them and maintain a hashtable
+		 */
+
+		String[] output = result.toString().split(",");
+		HashMap<String, String> map = new HashMap<String, String>();
+		for(String pair: output) {
+			Log.i("pair", pair);
+			String key = pair.split(" ")[0];
+			String value = pair.split(" ")[1];
+			//if(!map.containsKey(key)) {
+				map.put(key, value);
+			//}
+		}
+
+		/*
+		Now this node got all the messages from 4 nodes, now need to decide
+		 which messages belong to this node
+			1) Messages which are meant for this node ie this node is the coordinator node
+			2) Messages of two predessor nodes
+
+			*/
+
+		for(String key : map.keySet()) {
+			String partitionNode = getPartitionPort(key);
+			Log.i("KEY_Partition_Port_1_2", key+":"+partitionNode+":"+predessors[0]+":"+predessors[1]+":"+myPortId);
+			if(partitionNode.equals(myPortId) || partitionNode.equals(predessors[0]) ||
+			partitionNode.equals(predessors[1])) {
+
+				insertInLocalDb(mUri, key, map.get(key));
+			}
+		}
+	}
+
 	private class ServerTask extends AsyncTask<ServerSocket, String, Void> {
 
 		SimpleDynamoProvider dynamo = new SimpleDynamoProvider();
@@ -439,7 +552,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 			Socket socket = null;
 			DataInputStream dis = null;
 			InputStream stream = null;
-
 
 
 			while (true) {
@@ -533,6 +645,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String partitionPort = msgs[2];
 					if (!partitionPort.equals(myPortId)) {
 						// Send message to that node to insert value
+						Log.i("PARTITION_PORT", partitionPort);
 						String target = getSocketNumber(partitionPort);
 						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
 								Integer.parseInt(target));
@@ -547,6 +660,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String[] successors = getSuccessors(partitionPort);
 					for (String successor : successors) {
 						// Send message to successors to insert the value
+						Log.i("REPLICATION", successor);
 						String target = getSocketNumber(successor);
 						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
 								Integer.parseInt(target));
@@ -599,6 +713,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String[] successors = getSuccessors(partitionPort);
 					for (String successor : successors) {
 						// Send message to successors to delete the value
+
 						String target = getSocketNumber(successor);
 						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
 								Integer.parseInt(target));
@@ -609,6 +724,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 						dos.writeUTF(message);
 					}
+				}
+				else if(order.equals("REBORN")) {
+					reIncarnate();
 				}
 			} catch (UnknownHostException unknownHost) {
 				Log.i("Unknown_host", "Unknown_host");
@@ -643,6 +761,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private String[] getSuccessors(String port) {
 		int portIndex = -1;
 		String[] successors = new String[2];
+
+		String portsT = "";
+		for (int i = 0; i < portNumbers.size(); i++) {
+			portsT +=portNumbers.get(i) +" ";
+		}
+		Log.i("PORTS", portsT);
 		for (int i = 0; i < portNumbers.size(); i++) {
 			if (portNumbers.get(i).equals(port)) {
 				portIndex = i;
@@ -654,6 +778,30 @@ public class SimpleDynamoProvider extends ContentProvider {
 			successors[1] = portNumbers.get((portIndex + 2) % portNumbers.size());
 		}
 		return successors;
+	}
+
+		/*
+                Method to return the 2 predessors of Port
+         */
+	private String[] getPredessors(String port) {
+		int portIndex = -1;
+		String[] predessors = new String[2];
+		for (int i = 0; i < portNumbers.size(); i++) {
+			if (portNumbers.get(i).equals(port)) {
+				portIndex = i;
+				break;
+			}
+		}
+
+
+		if (portIndex != -1) {
+			//if(portIndex < 2) {
+				portIndex += portNumbers.size();
+			//}
+			predessors[0] = portNumbers.get((portIndex - 1) % portNumbers.size());
+			predessors[1] = portNumbers.get((portIndex - 2) % portNumbers.size());
+		}
+		return predessors;
 	}
 
 
