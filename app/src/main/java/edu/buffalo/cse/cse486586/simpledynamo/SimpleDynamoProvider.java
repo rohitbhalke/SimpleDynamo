@@ -128,8 +128,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		String partitionPort = getPartitionPort(key);
 		Log.i("Insert_partition", partitionPort+":"+myPortId);
-		if (partitionPort.equals(myPortId)) {
-			// Insert in local file system
+
+		String[] successors = getSuccessors(partitionPort);
+
+		if (partitionPort.equals(myPortId) || successors[0].equals(myPortId) || successors[1].equals(myPortId)) {
+			// Insert in local file system if the key's coordinator node is this node OR
+			// key's successor node is this node
 			insertInLocalDb(uri, key, value);
 		}
 
@@ -325,14 +329,19 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 					dos.writeUTF(message.getString());
 				} catch (UnknownHostException e) {
+					Log.e("UnknownHost_Send", "UnknownHost Exception::"+target);
 					e.printStackTrace();
 				} catch (IOException e) {
+					Log.e("IOException_send", "UnknownHost Exception::"+target);
 					e.printStackTrace();
 				}
 				catch (Exception e){
 					Log.e("Query_Exception_Send_DS", "For target::"+target);
 					// Ask one of its successor if this is failing
 					// Here need to query the replicas of the target node, and return their values
+
+					// get the successor of the target node here
+
 				}
 				InputStream inputStream = null;
 				try {
@@ -345,13 +354,76 @@ public class SimpleDynamoProvider extends ContentProvider {
 					matrixCursor.addRow(columns);
 					return matrixCursor;
 				} catch (IOException e) {
-					e.printStackTrace();
+					Log.i("IOException_Query_Read", "IOException_Query_Read");
+					//e.printStackTrace();
+					String value = QueryReplica(partitionPort, key);
+					String[] columns = {key, value};
+					matrixCursor.addRow(columns);
+					return matrixCursor;
+
 				} catch (Exception e) {
-					Log.e("Query_Exception_Receive_DS", "For target::"+target);
+					// Ask one of its successor if this is failing
+					// Here need to query the replicas of the target node, and return their values
+
+					// get the successor of the target node here
+					Log.e("Query_Except_Receive_DS", "For target::"+target);
+
+					try {
+						if(socket!=null) {
+							socket.close();
+						}
+					} catch (IOException e1) {
+						e1.printStackTrace();
+					}
+
+					String value = QueryReplica(partitionPort, key);
+					String[] columns = {key, value};
+					matrixCursor.addRow(columns);
+					return matrixCursor;
 				}
 			}
 		}
 
+		//return null;
+	}
+
+	private String QueryReplica(String partitionPort, String key) {
+
+		String[] successors = getSuccessors(partitionPort);
+
+		String target = getSocketNumber(successors[0]);
+		Socket socket=null;
+		try {
+			socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+					Integer.parseInt(target));
+			OutputStream stream = socket.getOutputStream();
+
+			DataOutputStream dos = new DataOutputStream(stream);
+
+			Message message = new Message(QUERY);
+			message.setKey(key);
+
+			dos.writeUTF(message.getString());
+
+			InputStream inputStream = socket.getInputStream();
+			DataInputStream dis = new DataInputStream(inputStream);
+			String value = dis.readUTF();
+			dos.close();
+			dis.close();
+			stream.close();
+			return value;
+		}
+		catch (Exception e) {
+			Log.e("Query_Replica_Excep", successors[0]);
+		}
+		finally {
+			try {
+				if (socket != null)
+					socket.close();
+			} catch (IOException e) {
+				Log.e(TAG, "Error while disconnecting socket");
+			}
+		}
 		return null;
 	}
 
@@ -465,7 +537,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		// get messages from 2 predessors
 		String[] predessors = getPredessors(myPortId);
 
-		String[] nodes = {successors[0], predessors[0], predessors[1]};
+		String[] nodes = {successors[0],successors[1], predessors[0], predessors[1]};
 
 		// Take messages from these 4 nodes first
 		StringBuilder result = new StringBuilder();
@@ -498,7 +570,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String message = dis.readUTF();
 
 					result.append(message);
-
+					Log.i("R-got-data-from", port);
+					socket.close();
 				} catch (IOException e) {
 					e.printStackTrace();
 				}
@@ -647,29 +720,46 @@ public class SimpleDynamoProvider extends ContentProvider {
 						// Send message to that node to insert value
 						Log.i("PARTITION_PORT", partitionPort);
 						String target = getSocketNumber(partitionPort);
-						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-								Integer.parseInt(target));
+						try {
+							socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+									Integer.parseInt(target));
 
-						stream = socket.getOutputStream();
+							stream = socket.getOutputStream();
 
-						dos = new DataOutputStream(stream);
+							dos = new DataOutputStream(stream);
 
-						dos.writeUTF(message);
+							dos.writeUTF(message);
+
+							socket.close();
+						}
+						catch (IOException err) {
+							Log.e("EXCEPTION_WRITE", "Exception while sending key to its partition node");
+						}
 					}
 
 					String[] successors = getSuccessors(partitionPort);
+
 					for (String successor : successors) {
 						// Send message to successors to insert the value
-						Log.i("REPLICATION", successor);
-						String target = getSocketNumber(successor);
-						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-								Integer.parseInt(target));
+						if(!successor.equals(myPortId)) {	// This is already handled
+							Log.i("REPLICATION", successor);
+							String target = getSocketNumber(successor);
+							try {
+								socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+										Integer.parseInt(target));
 
-						stream = socket.getOutputStream();
+								stream = socket.getOutputStream();
 
-						dos = new DataOutputStream(stream);
+								dos = new DataOutputStream(stream);
 
-						dos.writeUTF(message);
+								dos.writeUTF(message);
+								socket.close();
+							}
+							catch (IOException err) {
+								Log.e("EXCEPTION_Replica_WRITE", "Exception while sending key to its REPLICA node");
+								socket.close();
+							}
+						}
 					}
 				}
 				else if(order.equals(GDUMP_DELETE)) {
