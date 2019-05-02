@@ -58,6 +58,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private Uri mUri;
 
 
+	public static HashMap<String, String> queue = new HashMap<String, String>();	// Hold the messages which are being sent
+
+
 	public final String INSERT = "INSERT";
 
 	@Override
@@ -127,7 +130,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String value = (String) values.get("value");
 
 		String partitionPort = getPartitionPort(key);
-		Log.i("Insert_partition", partitionPort+":"+myPortId);
+		Log.i("Insert_partition_for",key+ ":" + partitionPort+":"+myPortId);
 
 		String[] successors = getSuccessors(partitionPort);
 
@@ -143,7 +146,13 @@ public class SimpleDynamoProvider extends ContentProvider {
 		Message message = new Message(INSERT);
 		message.setKey(key);
 		message.setValue(value);
+
+		// REMEMBER
+		queue.put(key, value);
+		Log.i("QUEUE_SIZE_BEFORE", String.valueOf(queue.size()));
+		// REMEMBER
 		new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, msg, message.getString(), partitionPort);
+
 
 		return null;
 	}
@@ -163,6 +172,17 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		try {
 			Log.i("CREATE_FILE", filename + "   " + fileContents + "  sha: " + fileHashValue);
+			// Versioning logic
+			if(fileExists(filename)) {
+				String existingValue = findKeyInLocal(filename);
+				int existingVersion = Character.getNumericValue(existingValue.charAt(1));
+				int newVersion = existingVersion + 1;
+				fileContents = "V"+String.valueOf(newVersion)+"_"+fileContents;
+				//fileContents = "V1_"+fileContents;
+			}
+			else {
+				fileContents = "V0_"+fileContents;
+			}
 			outputStream = currentContext.openFileOutput(filename, Context.MODE_PRIVATE);
 			synchronized (outputStream) {
 				outputStream.write(fileContents.getBytes());
@@ -174,6 +194,47 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		Log.v("insert", key + " : " + value);
 		return uri;
+	}
+
+	public void upgradeTheVersionNumber(String key) {
+		try {
+			FileInputStream fileReaderStream = currentContext.openFileInput(key);
+			InputStreamReader inputStream = new InputStreamReader(fileReaderStream);
+			BufferedReader br = new BufferedReader(inputStream);
+			String messageReceived = br.readLine();
+			Log.v("upgradeTheVersionNumber", messageReceived);
+
+			// update the version number
+			String value = messageReceived.substring(3);
+			int versionNum = Character.getNumericValue(messageReceived.charAt(1));
+			versionNum++;
+			String newVal = "V"+String.valueOf(versionNum)+"_"+value;
+			Log.v("NewValue", newVal);
+			FileOutputStream outputStream;
+			outputStream = currentContext.openFileOutput(key, Context.MODE_PRIVATE);
+			synchronized (outputStream) {
+				outputStream.write(newVal.getBytes());
+				outputStream.close();
+			}
+		}
+		catch (Exception e) {
+			Log.v("Exception", e.getMessage());
+		}
+
+	}
+
+	public boolean fileExists(String filename) {
+		File fileDirectory = currentContext.getFilesDir();
+		File[] listOfFiles = fileDirectory.listFiles();
+
+		for(int i=0;i<listOfFiles.length;i++) {
+			if(listOfFiles[i].getName().equals(filename)) {
+				return true;
+			}
+		}
+
+		return false;
+
 	}
 
 	@Override
@@ -248,7 +309,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		String[] columnNames = {"key", "value"};
 		if(selection.equals(LDUMP)) {
-			return getAllDataFromLocal(uri);
+			// No need to Implement versioning part here
+			MatrixCursor matrixCursor = getAllDataFromLocal(uri);
+			return removeVersioningInfoAndReturn(matrixCursor);
 		}
 		else if(selection.equals(GDUMP)) {
 			// Send messages to each avd and combine their result and return
@@ -300,9 +363,20 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String value = pair.split(" ")[1];
 					if(!map.containsKey(key)) {
 						map.put(key, value);
-                        String[] columnValues = {key, value};
-						matrixCursor.addRow(columnValues);
 					}
+					else {
+						String existingValue = map.get(key);
+						if((int)existingValue.charAt(1) < (int)value.charAt(1)) {
+							map.put(key, value);
+						}
+					}
+				}
+
+				// Now remove the versioning part and return matrixcursor
+
+				for(String key:map.keySet()) {
+					String[] columnValues = {key, map.get(key).substring(3)};
+					matrixCursor.addRow(columnValues);
 				}
 				return matrixCursor;
 		}
@@ -310,81 +384,146 @@ public class SimpleDynamoProvider extends ContentProvider {
 			String key = selection;
 			String partitionPort = getPartitionPort(key);
 			Log.i("Query", key+" :: " + partitionPort);
-			if(partitionPort.equals(myPortId)) {
-				return findInLocal(key);
+
+
+			String[] successors = getSuccessors(partitionPort);
+			String[] keyContainerPorts = {partitionPort, successors[0], successors[1]};
+
+			ArrayList<String> values = new ArrayList<String>();
+
+			// Query all 3 nodes and then choose the biggest versioning number and return
+
+
+			MatrixCursor matrixCursor = new MatrixCursor(columnNames);
+
+			if(keyContainerPorts[0].equals(myPortId) || keyContainerPorts[1].equals(myPortId) || keyContainerPorts[2].equals(myPortId)) {
+				Log.i("Gettin_Value_From", key +"   "+ myPortId);
+				String result = findKeyInLocal(key);
+				if(result==null){
+					Log.i("No_File_In_Local_For", key);
+				}
+				if(result!=null) {
+					values.add(result);
+				}
 			}
-			else {
-				MatrixCursor matrixCursor = new MatrixCursor(columnNames);
-				String target = getSocketNumber(partitionPort);
-				Socket socket = null;
-				try{
-					socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-							Integer.parseInt(target));
-					OutputStream stream = socket.getOutputStream();
-
-					DataOutputStream dos = new DataOutputStream(stream);
-
-					Message message = new Message(QUERY);
-					message.setKey(key);
-
-					dos.writeUTF(message.getString());
-				} catch (UnknownHostException e) {
-					Log.e("UnknownHost_Send", "UnknownHost Exception::"+target);
-					e.printStackTrace();
-				} catch (IOException e) {
-					Log.e("IOException_send", "UnknownHost Exception::"+target);
-					e.printStackTrace();
-				}
-				catch (Exception e){
-					Log.e("Query_Exception_Send_DS", "For target::"+target);
-					// Ask one of its successor if this is failing
-					// Here need to query the replicas of the target node, and return their values
-
-					// get the successor of the target node here
-
-				}
-				InputStream inputStream = null;
-				try {
-					inputStream = socket.getInputStream();
-					DataInputStream dis = new DataInputStream(inputStream);
-					String message = dis.readUTF();
-
-					String value = message;
-					String[] columns = {key, value};
-					matrixCursor.addRow(columns);
-					return matrixCursor;
-				} catch (IOException e) {
-					Log.i("IOException_Query_Read", "IOException_Query_Read");
-					//e.printStackTrace();
-					String value = QueryReplica(partitionPort, key);
-					String[] columns = {key, value};
-					matrixCursor.addRow(columns);
-					return matrixCursor;
-
-				} catch (Exception e) {
-					// Ask one of its successor if this is failing
-					// Here need to query the replicas of the target node, and return their values
-
-					// get the successor of the target node here
-					Log.e("Query_Except_Receive_DS", "For target::"+target);
-
+				// Ask 3 nodes about the data
+			Log.i("INFO", key+" " + keyContainerPorts.length);
+			for(String port : keyContainerPorts) {
+				if (!port.equals(myPortId)) {
+					Log.i("Gettin_Value_From_in", key +"   "+ port);
+					String target = getSocketNumber(port);
+					Socket socket = null;
 					try {
-						if(socket!=null) {
-							socket.close();
-						}
-					} catch (IOException e1) {
-						e1.printStackTrace();
+						socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+								Integer.parseInt(target));
+						OutputStream stream = socket.getOutputStream();
+
+						DataOutputStream dos = new DataOutputStream(stream);
+
+						Message message = new Message(QUERY);
+						message.setKey(key);
+
+						dos.writeUTF(message.getString());
+					} catch (UnknownHostException e) {
+						Log.e("UnknownHost_Send", "UnknownHost Exception::" + target);
+						e.printStackTrace();
+					} catch (IOException e) {
+						Log.e("IOException_send", "UnknownHost Exception::" + target);
+						e.printStackTrace();
+					} catch (Exception e) {
+						Log.e("Query_Exception_Send_DS", "For target::" + target);
+						// Ask one of its successor if this is failing
+						// Here need to query the replicas of the target node, and return their values
+
+						// get the successor of the target node here
+
 					}
+					InputStream inputStream = null;
+					try {
+						inputStream = socket.getInputStream();
+						DataInputStream dis = new DataInputStream(inputStream);
+						String message = dis.readUTF();
 
-					String value = QueryReplica(partitionPort, key);
-					String[] columns = {key, value};
-					matrixCursor.addRow(columns);
-					return matrixCursor;
+						String value = message;
+						if(value.length()>0) {
+                            values.add(value);
+                        }
+                        Log.i("GOT_VALUE_FOR_FROM_V", key +":"+port+value);
+						//String[] columns = {key, value};
+						//matrixCursor.addRow(columns);
+						//return matrixCursor;
+
+					} catch (IOException e) {
+						Log.i("IOException_Query_Read", "IOException_Query_Read");
+						//e.printStackTrace();
+					} catch (Exception e) {
+						// Ask one of its successor if this is failing
+						// Here need to query the replicas of the target node, and return their values
+
+						// get the successor of the target node here
+						Log.e("Query_Except_Receive_DS", "For target::" + target);
+
+						try {
+							if (socket != null) {
+								socket.close();
+							}
+						} catch (IOException e1) {
+							e1.printStackTrace();
+						}
+					}
 				}
-			}
-		}
 
+			}
+			String latestValue = findLatestValue(values);
+			//Remember QUEUE condition here
+
+			if(queue.containsKey(key)){
+				Log.i("PLAIN_VALUE", latestValue);
+				latestValue = queue.get(key);
+				Log.i("QUEUE_VALUE", latestValue);
+			}
+
+			//Remember QUEUE condition here
+			String[] columnValues = {key, latestValue};
+			matrixCursor.addRow(columnValues);
+			Log.i("Return_Key_Value", key +"  " + latestValue);
+			return matrixCursor;
+		}
 		//return null;
+	}
+
+	private Cursor removeVersioningInfoAndReturn(MatrixCursor matrixCursor) {
+		String[] columnNames = {"key", "value"};
+		MatrixCursor result = new MatrixCursor(columnNames);
+		int keyIndex = matrixCursor.getColumnIndex(KEY_FIELD);
+		int valueIndex = matrixCursor.getColumnIndex(VALUE_FIELD);
+		while(matrixCursor.moveToNext()) {
+			String key = matrixCursor.getString(keyIndex);
+			String value = matrixCursor.getString(valueIndex);
+			String[] columnValues = {key, value.substring(3)};
+			result.addRow(columnValues);
+		}
+		return result;
+	}
+
+
+	private String findLatestValue(ArrayList<String> values) {
+		Log.i("Exception_Preq", String.valueOf(values.size()));
+		for(int i=0;i<values.size();i++) {
+			Log.i("Exception_Here", values.get(i));
+		}
+		int version = (int) values.get(0).charAt(1);
+		String latest = values.get(0).substring(3);
+		Log.i("FindLatestValue", latest);
+		for(int i=1;i<values.size();i++) {
+			int local_version = (int) values.get(i).charAt(1);
+			if(local_version>version) {
+				version = local_version;
+				latest = values.get(i).substring(3);
+			}
+			Log.i("FindLatestValue", latest);
+		}
+		return latest;
 	}
 
 	private String QueryReplica(String partitionPort, String key) {
@@ -427,10 +566,31 @@ public class SimpleDynamoProvider extends ContentProvider {
 		return null;
 	}
 
-	private Cursor findInLocal(String keyToFind) {
+
+	private String findKeyInLocal(String keyToFind) {
 
 		try{
 			Log.v("query", keyToFind);
+			FileInputStream fileReaderStream = currentContext.openFileInput(keyToFind);
+			InputStreamReader inputStream = new InputStreamReader(fileReaderStream);
+			BufferedReader br = new BufferedReader(inputStream);
+			String messageReceived = br.readLine();
+			Log.v("File Content: ", messageReceived);
+			String[] columnNames = {"key", "value"};
+			MatrixCursor cursor = new MatrixCursor(columnNames);
+			String[] columnValues = {keyToFind, messageReceived};
+			return messageReceived;
+		}
+		catch (Exception e) {
+			Log.v("Exception", e.getMessage());
+		}
+		return null;
+	}
+
+	private Cursor findInLocal(String keyToFind) {
+
+		try{
+			Log.v("query_findInLocal", keyToFind);
 			FileInputStream fileReaderStream = currentContext.openFileInput(keyToFind);
 			InputStreamReader inputStream = new InputStreamReader(fileReaderStream);
 			BufferedReader br = new BufferedReader(inputStream);
@@ -445,6 +605,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		}
 		catch (Exception e) {
 			Log.v("Exception", e.getMessage());
+			//return null;
 		}
 		return null;
 	}
@@ -587,9 +748,21 @@ public class SimpleDynamoProvider extends ContentProvider {
 			Log.i("pair", pair);
 			String key = pair.split(" ")[0];
 			String value = pair.split(" ")[1];
-			//if(!map.containsKey(key)) {
+			if(!map.containsKey(key)) {
 				map.put(key, value);
-			//}
+			}
+			else {
+				if((int)map.get(key).charAt(1) < (int)value.charAt(1)) {
+					map.put(key, value);
+				}
+			}
+		}
+
+		// Now get all the messages without the version number values
+
+		for(String key:map.keySet()) {
+			String new_val = map.get(key).substring(3);
+			map.put(key, new_val);
 		}
 
 		/*
@@ -606,7 +779,24 @@ public class SimpleDynamoProvider extends ContentProvider {
 			if(partitionNode.equals(myPortId) || partitionNode.equals(predessors[0]) ||
 			partitionNode.equals(predessors[1])) {
 
-				insertInLocalDb(mUri, key, map.get(key));
+				/*
+						Here, while this node is synching with other nodes,
+						there could come a insert req on this node with same key and diff val
+						So this could be a problem, as while synching this node update the newly inserted value
+						So handle it here
+
+				 */
+//				if(!fileExists(key)) {
+//					insertInLocalDb(mUri, key, map.get(key));
+//				}
+
+				if(fileExists(key)) {
+					// Don't update the value instead update the version number
+					upgradeTheVersionNumber(key);
+				}
+				else {
+					insertInLocalDb(mUri, key, map.get(key));
+				}
 			}
 		}
 	}
@@ -666,10 +856,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 						String key = splittedMessage[1].split(":")[1];
 						Cursor cursor = dynamo.findInLocal(key);
 						String value = "";
-						while(cursor.moveToNext()) {
-							value = cursor.getString(cursor.getColumnIndex(VALUE_FIELD));
-						}
-
+						if(cursor != null) {
+                            while (cursor.moveToNext()) {
+                                value = cursor.getString(cursor.getColumnIndex(VALUE_FIELD));
+                            }
+                        }
+                        if(cursor==null){
+                            value = "";
+                        }
 						Log.i("Query_Search",key + "   :  "+ value);
 						DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
 						dos.writeUTF(value);
@@ -718,7 +912,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String partitionPort = msgs[2];
 					if (!partitionPort.equals(myPortId)) {
 						// Send message to that node to insert value
-						Log.i("PARTITION_PORT", partitionPort);
+						Log.i("PARTITION_PORT_For", message +":"+ partitionPort);
 						String target = getSocketNumber(partitionPort);
 						try {
 							socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
@@ -742,7 +936,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					for (String successor : successors) {
 						// Send message to successors to insert the value
 						if(!successor.equals(myPortId)) {	// This is already handled
-							Log.i("REPLICATION", successor);
+							Log.i("REPLICATION_For", message+":"+successor);
 							String target = getSocketNumber(successor);
 							try {
 								socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
@@ -761,6 +955,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 							}
 						}
 					}
+					String key = message.split(";")[1].split(":")[1];
+					queue.remove(key);
+					Log.i("QUEUE_SIZE_AFTER", String.valueOf(queue.size()));
 				}
 				else if(order.equals(GDUMP_DELETE)) {
 					for(String port : emulatorPorts) {
