@@ -128,10 +128,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		 */
 		String key = (String) values.get("key");
 		String value = (String) values.get("value");
-
 		String partitionPort = getPartitionPort(key);
-		Log.i("Insert_partition_for",key+ ":" + partitionPort+":"+myPortId);
-
 		String[] successors = getSuccessors(partitionPort);
 
 		if (partitionPort.equals(myPortId) || successors[0].equals(myPortId) || successors[1].equals(myPortId)) {
@@ -149,11 +146,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		// REMEMBER
 		queue.put(key, value);
-		Log.i("QUEUE_SIZE_BEFORE", String.valueOf(queue.size()));
 		// REMEMBER
 		new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, msg, message.getString(), partitionPort);
-
-
 		return null;
 	}
 
@@ -171,7 +165,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 		}
 
 		try {
-			Log.i("CREATE_FILE", filename + "   " + fileContents + "  sha: " + fileHashValue);
 			// Versioning logic
 			if(fileExists(filename)) {
 				String existingValue = findKeyInLocal(filename);
@@ -249,8 +242,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
 		final String portNumber = String.valueOf((Integer.parseInt(portStr) * 2));
 
-		Log.i("BOOT_UP", portStr+":"+portNumber);
-
 		myPortId = portStr;         // Ex: 5554
 		mySocketId = portNumber;    // Ex: 11108
 
@@ -270,14 +261,11 @@ public class SimpleDynamoProvider extends ContentProvider {
 		File[] listOfFiles = fileDirectory.listFiles();
 
 		if(listOfFiles.length > 0) {
-			Log.i("REINCARNATE", "Calling REINCARNATE");
 			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "REBORN");
 			/*
 					Cant call reIncarnate() from here as
 					https://stackoverflow.com/questions/6343166/how-do-i-fix-android-os-networkonmainthreadexception
 			 */
-
-			//reIncarnate();
 		}
 
 		return false;
@@ -310,7 +298,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String[] columnNames = {"key", "value"};
 		if(selection.equals(LDUMP)) {
 			// No need to Implement versioning part here
-			Log.i("LDUMP", "GOT");
 			MatrixCursor matrixCursor = getAllDataFromLocal(uri);
 			return removeVersioningInfoAndReturn(matrixCursor);
 		}
@@ -359,7 +346,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 				String[] output = result.toString().split(",");
 				HashMap<String, String> map = new HashMap<String, String>();
 				for(String pair: output) {
-					Log.i("pair", pair);
 					String key = pair.split(" ")[0];
 					String value = pair.split(" ")[1];
 					if(!map.containsKey(key)) {
@@ -384,9 +370,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 		else {
 			String key = selection;
 			String partitionPort = getPartitionPort(key);
-			Log.i("Query", key+" :: " + partitionPort);
-
-
 			String[] successors = getSuccessors(partitionPort);
 			String[] keyContainerPorts = {partitionPort, successors[0], successors[1]};
 
@@ -398,20 +381,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 			MatrixCursor matrixCursor = new MatrixCursor(columnNames);
 
 			if(keyContainerPorts[0].equals(myPortId) || keyContainerPorts[1].equals(myPortId) || keyContainerPorts[2].equals(myPortId)) {
-				Log.i("Gettin_Value_From", key +"   "+ myPortId);
 				String result = findKeyInLocal(key);
-				if(result==null){
-					Log.i("No_File_In_Local_For", key);
-				}
 				if(result!=null) {
 					values.add(result);
 				}
 			}
 				// Ask 3 nodes about the data
-			Log.i("INFO", key+" " + keyContainerPorts.length);
 			for(String port : keyContainerPorts) {
 				if (!port.equals(myPortId)) {
-					Log.i("Gettin_Value_From_in", key +"   "+ port);
 					String target = getSocketNumber(port);
 					Socket socket = null;
 					try {
@@ -449,13 +426,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 						if(value.length()>0) {
                             values.add(value);
                         }
-                        Log.i("GOT_VALUE_FOR_FROM_V", key +":"+port+", value: " + value);
 						//String[] columns = {key, value};
 						//matrixCursor.addRow(columns);
 						//return matrixCursor;
 
 					} catch (IOException e) {
-						Log.i("IOException_Query_Read", "IOException_Query_Read");
+						Log.e("IOException_Query_Read", "IOException_Query_Read");
 						//e.printStackTrace();
 					} catch (Exception e) {
 						// Ask one of its successor if this is failing
@@ -479,15 +455,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 			//Remember QUEUE condition here
 
 			if(latestValue==null || queue.containsKey(key)){
-				Log.i("PLAIN_VALUE", latestValue);
 				latestValue = queue.get(key);
-				Log.i("QUEUE_VALUE", latestValue);
 			}
 
 			//Remember QUEUE condition here
 			String[] columnValues = {key, latestValue};
 			matrixCursor.addRow(columnValues);
-			Log.i("Return_Key_Value", key +"  " + latestValue);
 			return matrixCursor;
 		}
 		//return null;
@@ -509,25 +482,18 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 
 	private String findLatestValue(ArrayList<String> values) {
-		Log.i("Exception_Preq", String.valueOf(values.size()));
 		if(values.size() > 0) {
-			for (int i = 0; i < values.size(); i++) {
-				Log.i("Exception_Here", values.get(i));
-			}
 			int version = (int) values.get(0).charAt(1);
 			String latest = values.get(0).substring(3);
-			Log.i("FindLatestValue", latest);
 			for (int i = 1; i < values.size(); i++) {
 				int local_version = (int) values.get(i).charAt(1);
 				if (local_version > version) {
 					version = local_version;
 					latest = values.get(i).substring(3);
 				}
-				Log.i("FindLatestValue", latest);
 			}
 			return latest;
 		}
-		Log.i("Latest_Value_None", "None");
 		return null;
 	}
 
@@ -628,7 +594,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 				InputStreamReader inputStream = new InputStreamReader(fileReaderStream);
 				BufferedReader br = new BufferedReader(inputStream);
 				String messageReceived = br.readLine();
-				Log.v("File Content: ", messageReceived);
 				String[] columnValues = {currentFile.getName(), messageReceived};
 				cursor.addRow(columnValues);
 			}
@@ -734,9 +699,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					inputStream = socket.getInputStream();
 					dis = new DataInputStream(inputStream);
 					String message = dis.readUTF();
-
 					result.append(message);
-					Log.i("R-got-data-from", port);
 					socket.close();
 				} catch (IOException e) {
 					e.printStackTrace();
@@ -750,7 +713,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String[] output = result.toString().split(",");
 		HashMap<String, String> map = new HashMap<String, String>();
 		for(String pair: output) {
-			Log.i("pair", pair);
 			String key = pair.split(" ")[0];
 			String value = pair.split(" ")[1];
 			if(!map.containsKey(key)) {
@@ -780,7 +742,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		for(String key : map.keySet()) {
 			String partitionNode = getPartitionPort(key);
-			Log.i("KEY_Partition_Port_1_2", key+":"+partitionNode+":"+predessors[0]+":"+predessors[1]+":"+myPortId);
 			if(partitionNode.equals(myPortId) || partitionNode.equals(predessors[0]) ||
 			partitionNode.equals(predessors[1])) {
 
@@ -835,7 +796,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 					if(messageType.equals(INSERT)) {
 						String key = splittedMessage[1].split(":")[1];
 						String value = splittedMessage[2].split(":")[1];
-						Log.i("Insert_Server", key+"  :  " +value);
 						dynamo.insertInLocalDb(mUri, key, value);
 					}
 					else if(messageType.equals(GDUMP_QUERY)) {
@@ -853,7 +813,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 							// key value,key value,key value
 						}
 						DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
-						Log.i("GDUMP_QUERY_ANSWER", sb.toString());
 						dos.writeUTF(sb.toString());
 						dos.flush();
 					}
@@ -869,7 +828,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                         if(cursor==null){
                             value = "";
                         }
-						Log.i("Query_Search",key + "   :  "+ value);
 						DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
 						dos.writeUTF(value);
 						dos.flush();
@@ -882,7 +840,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 						dynamo.deleteAllDataFromLocal(mUri);
 					}
 				} catch (IOException e) {
-					Log.i("Server_Failed", "YE");
 					Log.e(TAG, "Client Disconnected");
 					e.printStackTrace();
 				} catch (Exception e) {
@@ -917,7 +874,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String partitionPort = msgs[2];
 					if (!partitionPort.equals(myPortId)) {
 						// Send message to that node to insert value
-						Log.i("PARTITION_PORT_For", message +":"+ partitionPort);
 						String target = getSocketNumber(partitionPort);
 						try {
 							socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
@@ -941,7 +897,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 					for (String successor : successors) {
 						// Send message to successors to insert the value
 						if(!successor.equals(myPortId)) {	// This is already handled
-							Log.i("REPLICATION_For", message+":"+successor);
 							String target = getSocketNumber(successor);
 							try {
 								socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
@@ -962,7 +917,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 					}
 					String key = message.split(";")[1].split(":")[1];
 					queue.remove(key);
-					Log.i("QUEUE_SIZE_AFTER", String.valueOf(queue.size()));
 				}
 				else if(order.equals(GDUMP_DELETE)) {
 					for(String port : emulatorPorts) {
@@ -1021,7 +975,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					reIncarnate();
 				}
 			} catch (UnknownHostException unknownHost) {
-				Log.i("Unknown_host", "Unknown_host");
+				Log.e("Unknown_host", "Unknown_host");
 			} catch (IOException io) {
 				System.out.println(io.getStackTrace());
 			} finally {
@@ -1058,7 +1012,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 		for (int i = 0; i < portNumbers.size(); i++) {
 			portsT +=portNumbers.get(i) +" ";
 		}
-		Log.i("PORTS", portsT);
 		for (int i = 0; i < portNumbers.size(); i++) {
 			if (portNumbers.get(i).equals(port)) {
 				portIndex = i;
@@ -1084,8 +1037,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 				break;
 			}
 		}
-
-
 		if (portIndex != -1) {
 			//if(portIndex < 2) {
 				portIndex += portNumbers.size();
@@ -1095,6 +1046,4 @@ public class SimpleDynamoProvider extends ContentProvider {
 		}
 		return predessors;
 	}
-
-
 }
