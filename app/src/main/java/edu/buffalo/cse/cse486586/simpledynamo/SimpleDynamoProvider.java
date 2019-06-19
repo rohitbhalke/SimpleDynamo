@@ -310,6 +310,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String[] columnNames = {"key", "value"};
 		if(selection.equals(LDUMP)) {
 			// No need to Implement versioning part here
+			Log.i("LDUMP", "GOT");
 			MatrixCursor matrixCursor = getAllDataFromLocal(uri);
 			return removeVersioningInfoAndReturn(matrixCursor);
 		}
@@ -448,7 +449,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 						if(value.length()>0) {
                             values.add(value);
                         }
-                        Log.i("GOT_VALUE_FOR_FROM_V", key +":"+port+value);
+                        Log.i("GOT_VALUE_FOR_FROM_V", key +":"+port+", value: " + value);
 						//String[] columns = {key, value};
 						//matrixCursor.addRow(columns);
 						//return matrixCursor;
@@ -477,7 +478,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			String latestValue = findLatestValue(values);
 			//Remember QUEUE condition here
 
-			if(queue.containsKey(key)){
+			if(latestValue==null || queue.containsKey(key)){
 				Log.i("PLAIN_VALUE", latestValue);
 				latestValue = queue.get(key);
 				Log.i("QUEUE_VALUE", latestValue);
@@ -509,21 +510,25 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	private String findLatestValue(ArrayList<String> values) {
 		Log.i("Exception_Preq", String.valueOf(values.size()));
-		for(int i=0;i<values.size();i++) {
-			Log.i("Exception_Here", values.get(i));
-		}
-		int version = (int) values.get(0).charAt(1);
-		String latest = values.get(0).substring(3);
-		Log.i("FindLatestValue", latest);
-		for(int i=1;i<values.size();i++) {
-			int local_version = (int) values.get(i).charAt(1);
-			if(local_version>version) {
-				version = local_version;
-				latest = values.get(i).substring(3);
+		if(values.size() > 0) {
+			for (int i = 0; i < values.size(); i++) {
+				Log.i("Exception_Here", values.get(i));
 			}
+			int version = (int) values.get(0).charAt(1);
+			String latest = values.get(0).substring(3);
 			Log.i("FindLatestValue", latest);
+			for (int i = 1; i < values.size(); i++) {
+				int local_version = (int) values.get(i).charAt(1);
+				if (local_version > version) {
+					version = local_version;
+					latest = values.get(i).substring(3);
+				}
+				Log.i("FindLatestValue", latest);
+			}
+			return latest;
 		}
-		return latest;
+		Log.i("Latest_Value_None", "None");
+		return null;
 	}
 
 	private String QueryReplica(String partitionPort, String key) {
